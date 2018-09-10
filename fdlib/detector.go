@@ -6,17 +6,16 @@ import (
 	"log"
 	"net"
 	"os"
-	"time"
 )
 
 var (
-	logger *log.Logger = log.New(os.Stdout, "FDLib-Detector", log.Lshortfile)
+	logger *log.Logger = log.New(os.Stdout, "FDLib-", log.Lshortfile)
 )
 
 func checkError(err error) {
 	if err != nil {
-		logger.Println(err.Error())
-		os.Exit(1)
+		logger.Fatal(err.Error())
+		//os.Exit(1)
 	}
 }
 
@@ -56,32 +55,32 @@ func (fd Detector) StartResponding(LocalIpPort string) (err error) {
 	checkError(err)
 	conn, err := net.ListenUDP("udp", lAddr)
 	//defer conn.Close()
-	checkError(err)
+	if err == nil {
+		bufIn := make([]byte, 1024)
+		go func() {
+			for {
+				select {
+				case <- fd.respondingChan:
+					logger.Println(fmt.Sprintf("StartResponding - No longer responding on [%s]", LocalIpPort))
+					return
+				default:
+					n, rAddr, err := conn.ReadFromUDP(bufIn)
+					checkError(err)
+					// Handle heartbeat
+					var hbeatMsg HBeatMessage
+					err = json.Unmarshal(bufIn[:n], &hbeatMsg)
+					checkError(err)
+					logger.Println(fmt.Sprintf("StartResponding - Received heartbeat [%s]", string(bufIn)))
 
-	bufIn := make([]byte, 1024)
-	go func() {
-		for {
-			select {
-			case <- fd.respondingChan:
-				logger.Println(fmt.Sprintf("StartResponding - No longer responding on [%s]", LocalIpPort))
-				break
-			default:
-				n, rAddr, err := conn.ReadFromUDP(bufIn)
-				checkError(err)
-				var hbeatMsg HBeatMessage
-				err = json.Unmarshal(bufIn[:n], &hbeatMsg)
-				checkError(err)
-				logger.Println(fmt.Sprintf("StartResponding - Received heartbeat [%s]", string(bufIn)))
+					ackMsg := AckMessage{hbeatMsg.EpochNonce, hbeatMsg.SeqNum}
+					bufOut, err := json.Marshal(ackMsg)
+					logger.Println(fmt.Sprintf("StartResponding - Sending ack [%s] to [%s]", string(bufOut), rAddr))
+					conn.WriteToUDP(bufOut, rAddr)
+				}
 
-				ackMsg := AckMessage{hbeatMsg.EpochNonce, hbeatMsg.SeqNum}
-				bufOut, err := json.Marshal(ackMsg)
-				logger.Println(fmt.Sprintf("StartResponding - Sending ack [%s] to [%s]", string(bufOut), rAddr))
-				conn.WriteToUDP(bufOut, rAddr)
 			}
-
-		}
-	}()
-
+		}()
+	}
 	return
 }
 
@@ -103,11 +102,13 @@ func (fd Detector) AddMonitor(LocalIpPort string, RemoteIpPort string, LostMsgTh
 		LocalIpPort,
 		RemoteIpPort,
 		LostMsgThresh))
+
 	monitor, contains := fd.monitoring[RemoteIpPort]
 	if !contains {
 		// Create new startMonitor
 		logger.Println("AddMonitor - Adding supervisee to startMonitor")
-		monitor = newMonitor(LocalIpPort, RemoteIpPort, LostMsgThresh, fd.epochNonce)
+		monitor, err = newMonitor(LocalIpPort, RemoteIpPort, LostMsgThresh, fd.epochNonce)
+		checkError(err)
 		fd.monitoring[RemoteIpPort] = monitor
 	}
 	// Update threshold if different
@@ -151,19 +152,18 @@ func (fd Detector) startMonitor(monitor Monitor) {
 	logger.Println("startMonitor - Telling monitor to start sending heartbeats")
 
 	go func() {
-		failureChan := make(chan struct{})
-		monitor.Start(failureChan)
+		shutdown := make(chan struct{})
+		go monitor.StartMonitor(fd.notifyChan, shutdown)
+		<- shutdown
+		fd.RemoveMonitor(monitor.RemoteAddress)
+		return
 	}()
 
 	return
 }
 
 
-func (fd Detector) notifyFailureDetected(remoteAddr string) {
-	currentTime := time.Now()
-	failureDetectedMsg := FailureDetected{remoteAddr, currentTime}
-	fd.notifyChan <- failureDetectedMsg
-}
+
 
 
 
