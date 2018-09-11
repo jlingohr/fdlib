@@ -24,7 +24,7 @@ type Detector struct {
 	epochNonce   uint64
 	notifyChan   chan FailureDetected
 	respondingChan chan struct{}
-	monitoring   map[string]Monitor // Map from remote IP:PORT to Monitor
+	monitoring   map[string]*Monitor // Map from remote IP:PORT to Monitor
 	//seqNum
 }
 
@@ -34,7 +34,7 @@ type Detector struct {
 func CreateDetector(EpochNonce uint64, ChCapacity uint8) (fd FD, notifyCh <-chan FailureDetected, err error) {
 	notifyChan := make(chan FailureDetected, ChCapacity)
 	respondingChan := make(chan struct{})
-	monitoring := make(map[string]Monitor)
+	monitoring := make(map[string]*Monitor)
 	//seqNum := newSeqNum()
 
 	fd = Detector{EpochNonce, notifyChan, respondingChan, monitoring}
@@ -50,37 +50,56 @@ func CreateDetector(EpochNonce uint64, ChCapacity uint8) (fd FD, notifyCh <-chan
 // a local UDP IP:port. Can return an error that is related to the
 // underlying UDP connection.
 func (fd Detector) StartResponding(LocalIpPort string) (err error) {
-	logger.Println(fmt.Sprintf("StartResponding - Responding to heartbeats on [%s]", LocalIpPort))
 	lAddr, err := net.ResolveUDPAddr("udp", LocalIpPort)
 	checkError(err)
 	conn, err := net.ListenUDP("udp", lAddr)
-	//defer conn.Close()
-	if err == nil {
+	checkError(err)
+
+	go func() {
+		defer conn.Close()
 		bufIn := make([]byte, 1024)
-		go func() {
-			for {
-				select {
-				case <- fd.respondingChan:
-					logger.Println(fmt.Sprintf("StartResponding - No longer responding on [%s]", LocalIpPort))
-					return
-				default:
-					n, rAddr, err := conn.ReadFromUDP(bufIn)
-					checkError(err)
-					// Handle heartbeat
-					var hbeatMsg HBeatMessage
-					err = json.Unmarshal(bufIn[:n], &hbeatMsg)
-					checkError(err)
-					logger.Println(fmt.Sprintf("StartResponding - Received heartbeat [%s]", string(bufIn)))
+		for {
+			logger.Println(fmt.Sprintf("StartResponding - Waiting for heartbeats on [%s]", LocalIpPort))
+			//select {
+			//case <- fd.respondingChan:
+			//	logger.Println(fmt.Sprintf("StartResponding - No longer responding on [%s]", LocalIpPort))
+			//	return
+			//default:
+			//	n, rAddr, err := conn.ReadFromUDP(bufIn)
+			//	checkError(err)
+			//	// Handle heartbeat
+			//	var hbeatMsg HBeatMessage
+			//	err = json.Unmarshal(bufIn[:n], &hbeatMsg)
+			//	checkError(err)
+			//	logger.Println(fmt.Sprintf("StartResponding - Received heartbeat [%s]", string(bufIn)))
+			//
+			//	ackMsg := AckMessage{hbeatMsg.EpochNonce, hbeatMsg.SeqNum}
+			//	bufOut, err := json.Marshal(ackMsg)
+			//	logger.Println(fmt.Sprintf("StartResponding - Sending ack [%s] to [%s]", string(bufOut), rAddr))
+			//	conn.WriteToUDP(bufOut, rAddr)
+			//}
+			n, rAddr, err := conn.ReadFromUDP(bufIn)
+			checkError(err)
 
-					ackMsg := AckMessage{hbeatMsg.EpochNonce, hbeatMsg.SeqNum}
-					bufOut, err := json.Marshal(ackMsg)
-					logger.Println(fmt.Sprintf("StartResponding - Sending ack [%s] to [%s]", string(bufOut), rAddr))
-					conn.WriteToUDP(bufOut, rAddr)
-				}
+			// Handle heartbeat
+			var hbeatMsg HBeatMessage
+			err = json.Unmarshal(bufIn[:n], &hbeatMsg)
+			checkError(err)
+			logger.Println(fmt.Sprintf("StartResponding - Received heartbeat [%s]", string(bufIn[:n])))
 
-			}
-		}()
-	}
+			// Respond with Ack
+			ackMsg := AckMessage{hbeatMsg.EpochNonce, hbeatMsg.SeqNum}
+			bufOut, err := json.Marshal(ackMsg)
+			logger.Println(fmt.Sprintf("StartResponding - Sending ack [%s] to [%s]", string(bufOut[:n]), rAddr))
+			_, err = conn.WriteToUDP(bufOut, rAddr)
+			checkError(err)
+			logger.Println(fmt.Sprintf("StartResponding - Successfully sent ack to [%s]", rAddr))
+
+		}
+
+
+	}()
+
 	return
 }
 
@@ -107,7 +126,7 @@ func (fd Detector) AddMonitor(LocalIpPort string, RemoteIpPort string, LostMsgTh
 	if !contains {
 		// Create new startMonitor
 		logger.Println("AddMonitor - Adding supervisee to startMonitor")
-		monitor, err = newMonitor(LocalIpPort, RemoteIpPort, LostMsgThresh, fd.epochNonce)
+		monitor, err = NewMonitor(LocalIpPort, RemoteIpPort, LostMsgThresh, fd.epochNonce)
 		checkError(err)
 		fd.monitoring[RemoteIpPort] = monitor
 	}
@@ -117,7 +136,9 @@ func (fd Detector) AddMonitor(LocalIpPort string, RemoteIpPort string, LostMsgTh
 		monitor.Threshold = LostMsgThresh
 	}
 
-	fd.startMonitor(monitor)
+	go StartMonitor(monitor, fd.notifyChan)
+
+	//fd.startMonitor(monitor)
 
 	return
 }
@@ -139,28 +160,13 @@ func (fd Detector) RemoveMonitor(RemoteIpPort string) {
 func (fd Detector) StopMonitoring() {
 	logger.Println("StopMonitoring - Stopping all heartbeats...")
 	for _, monitor := range(fd.monitoring) {
-		fd.RemoveMonitor(monitor.RemoteAddress)
+		fd.RemoveMonitor(monitor.RemoteAddress.String())
 	}
 }
 
 //////////////////
 // Private methods
 
-
-
-func (fd Detector) startMonitor(monitor Monitor) {
-	logger.Println("startMonitor - Telling monitor to start sending heartbeats")
-
-	go func() {
-		shutdown := make(chan struct{})
-		go monitor.StartMonitor(fd.notifyChan, shutdown)
-		<- shutdown
-		fd.RemoveMonitor(monitor.RemoteAddress)
-		return
-	}()
-
-	return
-}
 
 
 

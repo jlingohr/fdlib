@@ -31,52 +31,52 @@ func (s seqNumber) getSeqNum() uint64 {
 }
 
 type Monitor struct {
-	RemoteAddress string
+	LocalAddress *net.UDPAddr
+	RemoteAddress *net.UDPAddr
 	Threshold     uint8
 	epochNonce    uint64
 	killSwitch    chan struct{}
 	delay         time.Duration
-	Conn          *net.UDPConn
+	//Conn          *net.UDPConn
 }
 
-func newMonitor(localAddress string, remoteAddress string, threshold uint8, epochNonce uint64) (monitor Monitor, err error) {
+func NewMonitor(localAddress string, remoteAddress string, threshold uint8, epochNonce uint64) (monitor *Monitor, err error) {
 	lAddr, err := net.ResolveUDPAddr("udp", localAddress)
 	checkError(err) //TODO probably should just exit here
 	rAddr, err := net.ResolveUDPAddr("udp", remoteAddress)
 	// Connect to the remote node
-	conn, err := net.DialUDP("udp", lAddr, rAddr)
-	checkError(err)
+	//conn, err := net.DialUDP("udp", lAddr, rAddr)
+	//checkError(err)
 
 	killSwitch := make(chan struct{})
 	initialDelay := 3 * time.Second
-	monitor = Monitor{remoteAddress, threshold, epochNonce ,killSwitch, initialDelay, conn}
-	logger.Println(fmt.Sprintf("newMonitor - remote [%s], threshold [%d], nonce [%d]",
+	monitor = &Monitor{lAddr, rAddr, threshold, epochNonce ,killSwitch, initialDelay}
+	logger.Println(fmt.Sprintf("NewMonitor - remote [%s], threshold [%d], nonce [%d]",
 		monitor.RemoteAddress, monitor.Threshold, monitor.epochNonce))
 	return
 }
 
-func (monitor Monitor) StartMonitor(notifyChan chan FailureDetected, shutdown chan struct{}) {
+func StartMonitor(monitor *Monitor, notifyChan chan FailureDetected) {
 
 	select {
 	case <- monitor.killSwitch:
 		//TODO stop monitor
 		logger.Println(fmt.Sprintf("StartMonitor - Killswitch hit. Shutting down monitor for remote [%s]", monitor.RemoteAddress))
-		monitor.Conn.Close()
+		//monitor.Conn.Close()
 		close(monitor.killSwitch)
 		return
 	default:
 		logger.Println(fmt.Sprintf("StartMonitor - Starting monitor for remote [%s]", monitor.RemoteAddress))
-		monitor.heartbeat(notifyChan, shutdown)
+		go heartbeat(monitor, notifyChan)
 	}
-
 }
 
-func (monitor Monitor) heartbeat(notifyChan chan FailureDetected, shutdown chan struct{}) (err error) {
+func heartbeat(monitor *Monitor, notifyChan chan FailureDetected) (err error) {
 	lostMessages := uint8(0)
 	success := make(chan struct{})
 	for lostMessages < monitor.Threshold {
 		// Make request
-		go monitor.makeRequest(success)
+		go makeRequest(monitor, success)
 
 		select {
 		case <- time.After(monitor.delay): //TODO
@@ -86,13 +86,16 @@ func (monitor Monitor) heartbeat(notifyChan chan FailureDetected, shutdown chan 
 			lostMessages = 0
 		}
 	}
-	logger.Println(fmt.Sprintf("heartbeat - Failed to get any acks. Shutting down monitor for [%s]", monitor.RemoteAddress))
-	notifyChan <- notifyFailureDetected(monitor.RemoteAddress)
-	shutdown <- struct{}{}
+	logger.Println(fmt.Sprintf("heartbeat - Failed to get any acks. Notifying failure for [%s]", monitor.RemoteAddress.String()))
+	notifyChan <- notifyFailureDetected(monitor.RemoteAddress.String())
+	//shutdown <- struct{}{}
 	return
 }
 
-func (monitor Monitor) makeRequest(success chan struct{}) {
+func makeRequest(monitor *Monitor, success chan struct{}) {
+	conn, err := net.DialUDP("udp", monitor.LocalAddress, monitor.RemoteAddress)
+	checkError(err)
+	defer conn.Close()
 	seqNum := seqNum.getSeqNum()
 	hbeatMsg := HBeatMessage{monitor.epochNonce, seqNum}
 
@@ -103,14 +106,15 @@ func (monitor Monitor) makeRequest(success chan struct{}) {
 		string(bufOut), monitor.RemoteAddress))
 
 	//reqStartTime := time.Now() //TODO
-	_, err = monitor.Conn.Write(bufOut)
+	_, err = conn.Write(bufOut)
+	logger.Println(fmt.Sprintf("makeRequest - Successfully send heartbeat to [%s]", monitor.RemoteAddress.String()))
 
 	// Read ack
 	bufIn := make([]byte, 1024)
-	n, raddr, err := monitor.Conn.ReadFromUDP(bufIn)
+	logger.Println(fmt.Sprintf("makeRequest - Waiting for ack from [%s]", monitor.RemoteAddress.String()))
+	n, err := conn.Read(bufIn)
 	checkError(err)
-
-	logger.Println(fmt.Sprintf("makeRequest - Read message [%s] from [%s]", string(bufIn[:n]), raddr.String()))
+	logger.Println(fmt.Sprintf("makeRequest - Received message [%s] from [%s]", string(bufIn[:n]), monitor.RemoteAddress))
 
 	if n > 0 {
 		//reqEndTime := time.Now() //TODO
@@ -124,14 +128,11 @@ func (monitor Monitor) makeRequest(success chan struct{}) {
 		if ackMsg.HBEatEpochNonce == hbeatMsg.EpochNonce && ackMsg.HBEatSeqNum == hbeatMsg.SeqNum {
 			logger.Println("makeRequest - Success! Received matching ack")
 			success <- struct{}{}
+			return
 		} else {
 			logger.Println(fmt.Sprintf("Expected nonce [%d] and seq [%d] but got nonce [%d] and seq [%d]",
 				hbeatMsg.EpochNonce, hbeatMsg.SeqNum, ackMsg.HBEatEpochNonce, ackMsg.HBEatSeqNum))
 		}
-	}
-
-	if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
-		logger.Println("makeRequest - Failed to get Ack")
 	}
 }
 

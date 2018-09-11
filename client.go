@@ -48,7 +48,7 @@ func main() {
 
 	// Add a monitor for a remote node.
 	localIpPortMon := "127.0.0.1:9090"
-	err = fd.AddMonitor(localIpPortMon, toMonitorIpPort, lostMsgThresh)
+	err = fd.AddMonitor(localIpPortMon, localIpPort, lostMsgThresh)
 	if checkError(err) != nil {
 		return
 	}
