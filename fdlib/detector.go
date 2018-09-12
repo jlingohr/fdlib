@@ -150,7 +150,8 @@ func (fd Detector) RemoveMonitor(RemoteIpPort string) {
 	if contains {
 		logger.Println(fmt.Sprintf("RemoveMonitor - Removing [%s]", RemoteIpPort))
 		monitored.killSwitch <- struct{}{}
-		close(monitored.killSwitch)
+		//close(monitored.killSwitch)
+		monitored.killSwitch <- struct{}{}
 		delete(fd.monitoring, RemoteIpPort)
 	}
 	return
