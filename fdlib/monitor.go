@@ -79,14 +79,17 @@ func StartMonitor(monitor *Monitor, notifyChan chan FailureDetected) {
 
 func heartbeat(monitor *Monitor, detected chan struct{}) {
 	logger.Println(fmt.Sprintf("heartbeat - Starting to monitor remote [%s]", monitor.RemoteAddress))
+	conn, err := net.DialUDP("udp", monitor.LocalAddress, monitor.RemoteAddress)
+	checkError(err)
+	//defer conn.Close() //TODO
 	lostMessages := uint8(0)
 	success := make(chan struct{})
+	seq := seqNum.getSeqNum()
 	for lostMessages < monitor.Threshold {
 		// Make request
 		delay := monitor.getDelay()
-		seqNum := seqNum.getSeqNum()
 
-		go makeRequest(monitor, seqNum, delay, success)
+		go makeRequest(conn, monitor, seq, delay, success)
 
 		select {
 		case <- time.After(delay): 
@@ -94,6 +97,7 @@ func heartbeat(monitor *Monitor, detected chan struct{}) {
 		case <- success:
 			logger.Println("heartbeat - Resetting attempts and deadline")
 			lostMessages = 0
+			seq = seqNum.getSeqNum()
 		}
 
 	}
@@ -102,31 +106,26 @@ func heartbeat(monitor *Monitor, detected chan struct{}) {
 	return
 }
 
-func makeRequest(monitor *Monitor, seqNum uint64, delay time.Duration, success chan struct{}) {
-	conn, err := net.DialUDP("udp", monitor.LocalAddress, monitor.RemoteAddress)
-	checkError(err)
-	defer conn.Close()
+func makeRequest(conn *net.UDPConn, monitor *Monitor, seqNum uint64, delay time.Duration, success chan struct{}) {
+
 	//seqNum := seqNum.getSeqNum()
 	hbeatMsg := HBeatMessage{monitor.epochNonce, seqNum}
 
 	bufOut, err := json.Marshal(hbeatMsg)
 	checkError(err)
 	logger.Println(fmt.Sprintf(
-		"makeRequest - Sending new heartbeat request [%s] to remote [%s]",
-		string(bufOut), monitor.RemoteAddress))
+		"makeRequest - Sending new heartbeat request [%s] to remote [%s] from [%s]",
+		string(bufOut), monitor.RemoteAddress, monitor.LocalAddress))
 
 	// Send request
 	reqStartTime := time.Now() //TODO
 	_, err = conn.Write(bufOut)
-	logger.Println(fmt.Sprintf("makeRequest - Successfully send heartbeat to [%s]", monitor.RemoteAddress.String()))
 
 	// Read ack
 	bufIn := make([]byte, 1024)
-	logger.Println(fmt.Sprintf("makeRequest - Waiting for ack from [%s]", monitor.RemoteAddress.String()))
 	n, err := conn.Read(bufIn)
 	checkError(err)
 	reqEndTime := time.Now()
-	logger.Println(fmt.Sprintf("makeRequest - Received message [%s] from [%s]", string(bufIn[:n]), monitor.RemoteAddress))
 
 	monitor.updateRTT(reqStartTime, reqEndTime)
 

@@ -56,7 +56,7 @@ func (fd Detector) StartResponding(LocalIpPort string) (err error) {
 	checkError(err)
 
 	go func() {
-		defer conn.Close()
+		//defer conn.Close() //TODO
 		bufIn := make([]byte, 1024)
 		for {
 			logger.Println(fmt.Sprintf("StartResponding - Waiting for heartbeats on [%s]", LocalIpPort))
@@ -85,16 +85,14 @@ func (fd Detector) StartResponding(LocalIpPort string) (err error) {
 			var hbeatMsg HBeatMessage
 			err = json.Unmarshal(bufIn[:n], &hbeatMsg)
 			checkError(err)
-			logger.Println(fmt.Sprintf("StartResponding - Received heartbeat [%s]", string(bufIn[:n])))
+			logger.Println(fmt.Sprintf("StartResponding - Received heartbeat [%s] on [%s] from [%s]",
+				string(bufIn[:n]), LocalIpPort, rAddr.String()))
 
 			// Respond with Ack
 			ackMsg := AckMessage{hbeatMsg.EpochNonce, hbeatMsg.SeqNum}
 			bufOut, err := json.Marshal(ackMsg)
-			logger.Println(fmt.Sprintf("StartResponding - Sending ack [%s] to [%s]", string(bufOut[:n]), rAddr))
 			_, err = conn.WriteToUDP(bufOut, rAddr)
 			checkError(err)
-			logger.Println(fmt.Sprintf("StartResponding - Successfully sent ack to [%s]", rAddr))
-
 		}
 
 
