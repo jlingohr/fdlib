@@ -13,12 +13,11 @@ var (
 )
 
 type seqNumber struct {
-	SeqNum uint64 // TODO should be initialized randomly
+	SeqNum uint64
 	mux sync.Mutex
 }
 
 func newSeqNumber() *seqNumber {
-	//return seqNumber{SeqNum: rand.Uint64()}
 	return &seqNumber{SeqNum: 0}
 }
 
@@ -38,7 +37,6 @@ type Monitor struct {
 	epochNonce    uint64
 	killSwitch    chan struct{}
 	delay         time.Duration
-	//Conn          *net.UDPConn
 	delayMux sync.Mutex
 }
 
@@ -47,16 +45,15 @@ func NewMonitor(localAddress string, remoteAddress string, threshold uint8, epoc
 	lAddr, err := net.ResolveUDPAddr("udp", localAddress)
 	checkError(err) //TODO probably should just exit here
 	rAddr, err := net.ResolveUDPAddr("udp", remoteAddress)
-	// Connect to the remote node
-	//conn, err := net.DialUDP("udp", lAddr, rAddr)
-	//checkError(err)
-
 	killSwitch := make(chan struct{})
 	initialDelay := 3 * time.Second
 	delayMux := sync.Mutex{}
+
 	monitor = &Monitor{lAddr, rAddr, threshold, epochNonce ,killSwitch, initialDelay, delayMux}
+
 	logger.Println(fmt.Sprintf("NewMonitor - remote [%s], threshold [%d], nonce [%d]",
 		monitor.RemoteAddress, monitor.Threshold, monitor.epochNonce))
+
 	return
 }
 
@@ -89,22 +86,23 @@ func heartbeat(monitor *Monitor, detected chan struct{}) {
 		delay := monitor.getDelay()
 		seqNum := seqNum.getSeqNum()
 
-		go makeRequest(monitor, seqNum, success)
+		go makeRequest(monitor, seqNum, delay, success)
 
 		select {
-		case <- time.After(delay): //TODO
+		case <- time.After(delay): 
 			lostMessages += 1
 		case <- success:
 			logger.Println("heartbeat - Resetting attempts and deadline")
 			lostMessages = 0
 		}
+
 	}
 
 	detected <- struct{}{}
 	return
 }
 
-func makeRequest(monitor *Monitor, seqNum uint64, success chan struct{}) {
+func makeRequest(monitor *Monitor, seqNum uint64, delay time.Duration, success chan struct{}) {
 	conn, err := net.DialUDP("udp", monitor.LocalAddress, monitor.RemoteAddress)
 	checkError(err)
 	defer conn.Close()
@@ -127,7 +125,7 @@ func makeRequest(monitor *Monitor, seqNum uint64, success chan struct{}) {
 	logger.Println(fmt.Sprintf("makeRequest - Waiting for ack from [%s]", monitor.RemoteAddress.String()))
 	n, err := conn.Read(bufIn)
 	checkError(err)
-	reqEndTime := time.Now() //TODO
+	reqEndTime := time.Now()
 	logger.Println(fmt.Sprintf("makeRequest - Received message [%s] from [%s]", string(bufIn[:n]), monitor.RemoteAddress))
 
 	monitor.updateRTT(reqStartTime, reqEndTime)
@@ -137,11 +135,11 @@ func makeRequest(monitor *Monitor, seqNum uint64, success chan struct{}) {
 		err = json.Unmarshal(bufIn[:n], &ackMsg)
 		checkError(err)
 
-		// TODO update RTT
-
 		// Check ack is for the correct heartbeat
 		if ackMsg.HBEatEpochNonce == hbeatMsg.EpochNonce && ackMsg.HBEatSeqNum == hbeatMsg.SeqNum {
 			logger.Println("makeRequest - Success! Received matching ack")
+			sleepTime := reqStartTime.Add(delay).Sub(reqEndTime)
+			<- time.After(sleepTime)//TODO is this correct
 			success <- struct{}{}
 			return
 		} else {
