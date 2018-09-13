@@ -57,7 +57,7 @@ func NewMonitor(localAddress string, remoteAddress string, threshold uint8, epoc
 	return
 }
 
-func StartMonitor(monitor *Monitor, notifyChan chan FailureDetected) {
+func StartMonitor(monitor *Monitor, notifyChan chan FailureDetected, failureChan chan FailureDetected) {
 
 	detected := make(chan struct{})
 	defer close(detected)
@@ -69,11 +69,13 @@ func StartMonitor(monitor *Monitor, notifyChan chan FailureDetected) {
 		//TODO stop monitor
 		logger.Println(fmt.Sprintf("StartMonitor - Killswitch hit. Shutting down monitor for remote [%s]", monitor.RemoteAddress))
 		//monitor.Conn.Close()
-		close(monitor.killSwitch)
+		//monitor.killSwitch
 		return
 	case <- detected:
 		logger.Println(fmt.Sprintf("StartMonitor - Failed to get any acks. Notifying failure for [%s]", monitor.RemoteAddress.String()))
 		notifyChan <- notifyFailureDetected(monitor.RemoteAddress.String())
+		close(failureChan)
+		return
 	}
 }
 
@@ -140,12 +142,12 @@ func makeRequest(conn *net.UDPConn, monitor *Monitor, seqNum uint64, delay time.
 			sleepTime := reqStartTime.Add(delay).Sub(reqEndTime)
 			<- time.After(sleepTime)//TODO is this correct
 			success <- struct{}{}
-			return
 		} else {
 			logger.Println(fmt.Sprintf("Expected nonce [%d] and seq [%d] but got nonce [%d] and seq [%d]",
 				hbeatMsg.EpochNonce, hbeatMsg.SeqNum, ackMsg.HBEatEpochNonce, ackMsg.HBEatSeqNum))
 		}
 	}
+	return
 }
 
 func (monitor *Monitor) updateRTT(reqStartTime time.Time, reqEndTime time.Time) {

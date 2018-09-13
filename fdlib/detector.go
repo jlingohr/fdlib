@@ -23,8 +23,8 @@ func checkError(err error) {
 type Detector struct {
 	epochNonce   uint64
 	notifyChan   chan FailureDetected
-	respondingChan chan struct{}
 	monitoring   map[string]*Monitor // Map from remote IP:PORT to Monitor
+	respondingChan chan struct{} // Channel the local listens to
 	//seqNum
 }
 
@@ -37,7 +37,7 @@ func CreateDetector(EpochNonce uint64, ChCapacity uint8) (fd FD, notifyCh <-chan
 	monitoring := make(map[string]*Monitor)
 	//seqNum := newSeqNum()
 
-	fd = Detector{EpochNonce, notifyChan, respondingChan, monitoring}
+	fd = Detector{EpochNonce, notifyChan, monitoring, respondingChan}
 	//TODO return error if called multiple times with the same epochNonce
 
 	return
@@ -60,42 +60,28 @@ func (fd Detector) StartResponding(LocalIpPort string) (err error) {
 		bufIn := make([]byte, 1024)
 		for {
 			logger.Println(fmt.Sprintf("StartResponding - Waiting for heartbeats on [%s]", LocalIpPort))
-			//select {
-			//case <- fd.respondingChan:
-			//	logger.Println(fmt.Sprintf("StartResponding - No longer responding on [%s]", LocalIpPort))
-			//	return
-			//default:
-			//	n, rAddr, err := conn.ReadFromUDP(bufIn)
-			//	checkError(err)
-			//	// Handle heartbeat
-			//	var hbeatMsg HBeatMessage
-			//	err = json.Unmarshal(bufIn[:n], &hbeatMsg)
-			//	checkError(err)
-			//	logger.Println(fmt.Sprintf("StartResponding - Received heartbeat [%s]", string(bufIn)))
-			//
-			//	ackMsg := AckMessage{hbeatMsg.EpochNonce, hbeatMsg.SeqNum}
-			//	bufOut, err := json.Marshal(ackMsg)
-			//	logger.Println(fmt.Sprintf("StartResponding - Sending ack [%s] to [%s]", string(bufOut), rAddr))
-			//	conn.WriteToUDP(bufOut, rAddr)
-			//}
-			n, rAddr, err := conn.ReadFromUDP(bufIn)
-			checkError(err)
+			select {
+			case <- fd.respondingChan:
+				logger.Println(fmt.Sprintf("StartResponding - No longer responding on [%s]", LocalIpPort))
+				return
+			default:
+				n, rAddr, err := conn.ReadFromUDP(bufIn)
+				checkError(err)
 
-			// Handle heartbeat
-			var hbeatMsg HBeatMessage
-			err = json.Unmarshal(bufIn[:n], &hbeatMsg)
-			checkError(err)
-			logger.Println(fmt.Sprintf("StartResponding - Received heartbeat [%s] on [%s] from [%s]",
-				string(bufIn[:n]), LocalIpPort, rAddr.String()))
+				// Handle heartbeat
+				var hbeatMsg HBeatMessage
+				err = json.Unmarshal(bufIn[:n], &hbeatMsg)
+				checkError(err)
+				logger.Println(fmt.Sprintf("StartResponding - Received heartbeat [%s] on [%s] from [%s]",
+					string(bufIn[:n]), LocalIpPort, rAddr.String()))
 
-			// Respond with Ack
-			ackMsg := AckMessage{hbeatMsg.EpochNonce, hbeatMsg.SeqNum}
-			bufOut, err := json.Marshal(ackMsg)
-			_, err = conn.WriteToUDP(bufOut, rAddr)
-			checkError(err)
+				// Respond with Ack
+				ackMsg := AckMessage{hbeatMsg.EpochNonce, hbeatMsg.SeqNum}
+				bufOut, err := json.Marshal(ackMsg)
+				_, err = conn.WriteToUDP(bufOut, rAddr)
+				checkError(err)
+			}
 		}
-
-
 	}()
 
 	return
@@ -105,7 +91,7 @@ func (fd Detector) StartResponding(LocalIpPort string) (err error) {
 // messages. Always succeeds.
 func (fd Detector) StopResponding() {
 	logger.Println("StopResponding - No longer responding to heartbeats")
-	close(fd.respondingChan)
+	fd.respondingChan <- struct{}{}
 	return
 }
 
@@ -134,9 +120,9 @@ func (fd Detector) AddMonitor(LocalIpPort string, RemoteIpPort string, LostMsgTh
 		monitor.Threshold = LostMsgThresh
 	}
 
-	go StartMonitor(monitor, fd.notifyChan)
+	//go StartMonitor(monitor, fd.notifyChan)
 
-	//fd.startMonitor(monitor)
+	fd.startMonitor(monitor)
 
 	return
 }
@@ -148,9 +134,6 @@ func (fd Detector) RemoveMonitor(RemoteIpPort string) {
 	if contains {
 		logger.Println(fmt.Sprintf("RemoveMonitor - Removing [%s]", RemoteIpPort))
 		monitored.killSwitch <- struct{}{}
-		//close(monitored.killSwitch)
-		monitored.killSwitch <- struct{}{}
-		delete(fd.monitoring, RemoteIpPort)
 	}
 	return
 }
@@ -166,7 +149,16 @@ func (fd Detector) StopMonitoring() {
 //////////////////
 // Private methods
 
+func (fd Detector) startMonitor(monitor *Monitor) {
 
+	go func() {
+		failureChan := make(chan FailureDetected)
+		go StartMonitor(monitor, fd.notifyChan, failureChan)
+		detected := <- failureChan
+		fd.RemoveMonitor(detected.UDPIpPort)
+		return
+	}()
+}
 
 
 
