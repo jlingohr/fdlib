@@ -39,7 +39,6 @@ func CreateDetector(EpochNonce uint64, ChCapacity uint8) (fd FD, notifyCh <-chan
 
 	fd = Detector{EpochNonce, notifyChan, monitoring, respondingChan}
 	//TODO return error if called multiple times with the same epochNonce
-
 	return
 }
 
