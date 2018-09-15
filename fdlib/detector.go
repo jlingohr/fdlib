@@ -10,13 +10,15 @@ import (
 
 var (
 	logger *log.Logger = log.New(os.Stdout, "FDLib-", log.Lshortfile)
+	FDLib *Detector
 )
 
-func checkError(err error) {
+func checkError(err error) bool {
 	if err != nil {
-		logger.Fatal(err.Error())
-		//os.Exit(1)
+		logger.Println(err.Error())
+		return true
 	}
+	return false
 }
 
 
@@ -25,6 +27,7 @@ type Detector struct {
 	notifyChan   chan FailureDetected
 	monitoring   map[string]*Monitor // Map from remote IP:PORT to Monitor
 	respondingChan chan struct{} // Channel the local listens to
+	remoteToIDMap map[string]string // Map from remote address to Local::Remote id
 	//seqNum
 }
 
@@ -35,10 +38,10 @@ func CreateDetector(EpochNonce uint64, ChCapacity uint8) (fd FD, notifyCh <-chan
 	notifyChan := make(chan FailureDetected, ChCapacity)
 	respondingChan := make(chan struct{})
 	monitoring := make(map[string]*Monitor)
+	idMap := make(map[string]string)
 	//seqNum := newSeqNum()
 
-	fd = Detector{EpochNonce, notifyChan, monitoring, respondingChan}
-	//TODO return error if called multiple times with the same epochNonce
+	fd = Detector{EpochNonce, notifyChan, monitoring, respondingChan, idMap}
 	return
 }
 
@@ -105,31 +108,38 @@ func (fd Detector) AddMonitor(LocalIpPort string, RemoteIpPort string, LostMsgTh
 		RemoteIpPort,
 		LostMsgThresh))
 
-	monitor, contains := fd.monitoring[RemoteIpPort]
+	id := LocalIpPort + "::" + RemoteIpPort
+
+	monitor, contains := fd.monitoring[id]
 	if !contains {
 		// Create new startMonitor
 		logger.Println("AddMonitor - Adding supervisee to startMonitor")
 		monitor, err = NewMonitor(LocalIpPort, RemoteIpPort, LostMsgThresh, fd.epochNonce)
-		checkError(err)
-		fd.monitoring[RemoteIpPort] = monitor
+		if err == nil {
+			fd.remoteToIDMap[RemoteIpPort] = id
+			fd.monitoring[id] = monitor
+			fd.startMonitor(monitor)
+		}
+		return
 	}
-	// Update threshold if different
 	if monitor.Threshold != LostMsgThresh {
 		logger.Println("AddMonitor - Updating lost message threshold")
+		monitor.killSwitch <- struct{}{}
 		monitor.Threshold = LostMsgThresh
+		fd.startMonitor(monitor)
+		return
 	}
-
-	//go StartMonitor(monitor, fd.notifyChan)
-
-	fd.startMonitor(monitor)
-
 	return
 }
 
 // Tells the library to stop monitoring a particular remote UDP
 // IP:port. Always succeeds.
 func (fd Detector) RemoveMonitor(RemoteIpPort string) {
-	monitored, contains := fd.monitoring[RemoteIpPort]
+	id, contains := fd.remoteToIDMap[RemoteIpPort]
+	if !contains {
+		return
+	}
+	monitored, contains := fd.monitoring[id]
 	if contains {
 		logger.Println(fmt.Sprintf("RemoveMonitor - Removing [%s]", RemoteIpPort))
 		monitored.killSwitch <- struct{}{}
@@ -141,10 +151,13 @@ func (fd Detector) RemoveMonitor(RemoteIpPort string) {
 func (fd Detector) StopMonitoring() {
 	logger.Println("StopMonitoring - Stopping all heartbeats...")
 	for _, monitor := range(fd.monitoring) {
-		fd.RemoveMonitor(monitor.RemoteAddress.String())
+		fd.RemoveMonitor(monitor.Conn.RemoteAddr().String())
 	}
 }
 
+func (fd Detector) Stop() {
+	return
+}
 //////////////////
 // Private methods
 

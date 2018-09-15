@@ -30,9 +30,14 @@ func (s *seqNumber) getSeqNum() uint64 {
 	return num
 }
 
+type Request struct {
+	SeqNum uint64
+	StartTime time.Time
+	EndTime time.Time
+}
+
 type Monitor struct {
-	LocalAddress *net.UDPAddr
-	RemoteAddress *net.UDPAddr
+	Conn *net.UDPConn
 	Threshold     uint8
 	epochNonce    uint64
 	killSwitch    chan struct{}
@@ -43,16 +48,27 @@ type Monitor struct {
 
 func NewMonitor(localAddress string, remoteAddress string, threshold uint8, epochNonce uint64) (monitor *Monitor, err error) {
 	lAddr, err := net.ResolveUDPAddr("udp", localAddress)
-	checkError(err) //TODO probably should just exit here
+	if checkError(err) {
+		return
+	}
 	rAddr, err := net.ResolveUDPAddr("udp", remoteAddress)
+	if checkError(err) {
+		return
+	}
+	conn, err := net.DialUDP("udp", lAddr, rAddr)
+	if checkError(err) {
+		return
+	}
 	killSwitch := make(chan struct{})
 	initialDelay := 3 * time.Second
 	delayMux := sync.Mutex{}
 
-	monitor = &Monitor{lAddr, rAddr, threshold, epochNonce ,killSwitch, initialDelay, delayMux}
-
-	logger.Println(fmt.Sprintf("NewMonitor - remote [%s], threshold [%d], nonce [%d]",
-		monitor.RemoteAddress, monitor.Threshold, monitor.epochNonce))
+	monitor = &Monitor{conn,
+	threshold,
+	epochNonce ,
+	killSwitch,
+	initialDelay,
+	delayMux}
 
 	return
 }
@@ -67,87 +83,97 @@ func StartMonitor(monitor *Monitor, notifyChan chan FailureDetected, failureChan
 	select {
 	case <- monitor.killSwitch:
 		//TODO stop monitor
-		logger.Println(fmt.Sprintf("StartMonitor - Killswitch hit. Shutting down monitor for remote [%s]", monitor.RemoteAddress))
-		//monitor.Conn.Close()
+		logger.Println(fmt.Sprintf("StartMonitor - Killswitch hit. Shutting down monitor for remote [%s]", monitor.Conn.RemoteAddr().String()))
+		monitor.Conn.Close()
 		//monitor.killSwitch
 		return
 	case <- detected:
-		logger.Println(fmt.Sprintf("StartMonitor - Failed to get any acks. Notifying failure for [%s]", monitor.RemoteAddress.String()))
-		notifyChan <- notifyFailureDetected(monitor.RemoteAddress.String())
+		logger.Println(fmt.Sprintf("StartMonitor - Failed to get any acks. Notifying failure for [%s]", monitor.Conn.RemoteAddr().String()))
+		notifyChan <- notifyFailureDetected(monitor.Conn.RemoteAddr().String())
 		close(failureChan)
 		return
 	}
 }
 
-func heartbeat(monitor *Monitor, detected chan struct{}) {
-	logger.Println(fmt.Sprintf("heartbeat - Starting to monitor remote [%s]", monitor.RemoteAddress))
-	conn, err := net.DialUDP("udp", monitor.LocalAddress, monitor.RemoteAddress)
-	checkError(err)
-	//defer conn.Close() //TODO
+func heartbeat(monitor *Monitor, failureDetected chan struct{}) {
 	lostMessages := uint8(0)
-	success := make(chan struct{})
+	ackChannel := make(chan struct{})
+	timeoutChan := make(chan struct{})
 	seq := seqNum.getSeqNum()
+	delay := monitor.getDelay()
 	for lostMessages < monitor.Threshold {
 		// Make request
-		delay := monitor.getDelay()
-
-		go makeRequest(conn, monitor, seq, delay, success)
+		go heartbeatRequest(monitor, seq)
+		monitor.Conn.SetReadDeadline(time.Now().Add(delay))
+		go heartbeatResponse(monitor, seq, delay, ackChannel, timeoutChan) //TODO keep request and response seperte
 
 		select {
-		case <- time.After(delay): 
+		case <- timeoutChan:
 			lostMessages += 1
-		case <- success:
+		case <-ackChannel:
 			logger.Println("heartbeat - Resetting attempts and deadline")
 			lostMessages = 0
 			seq = seqNum.getSeqNum()
 		}
+		delay = monitor.getDelay()
 
 	}
 
-	detected <- struct{}{}
+	failureDetected <- struct{}{}
 	return
 }
 
-func makeRequest(conn *net.UDPConn, monitor *Monitor, seqNum uint64, delay time.Duration, success chan struct{}) {
-
-	//seqNum := seqNum.getSeqNum()
+func heartbeatRequest(monitor *Monitor, seqNum uint64) {
+	//TODO need to change so can have at most n outstanding requests but when receives late can still update
+	// i.e. make more like tcp
+	// This means making the response look for specific seq nums
+	// (recall seq nums in 317)
 	hbeatMsg := HBeatMessage{monitor.epochNonce, seqNum}
-
 	bufOut, err := json.Marshal(hbeatMsg)
 	checkError(err)
-	logger.Println(fmt.Sprintf(
-		"makeRequest - Sending new heartbeat request [%s] to remote [%s] from [%s]",
-		string(bufOut), monitor.RemoteAddress, monitor.LocalAddress))
 
 	// Send request
-	reqStartTime := time.Now() //TODO
-	_, err = conn.Write(bufOut)
+	_, err = monitor.Conn.Write(bufOut)
+	return
+}
 
+func heartbeatResponse(monitor *Monitor, seq uint64, delay time.Duration, ackChannel chan struct{}, timeoutChan chan struct{}) {
+	//TODO should probably loop so if receive wrong seq num can continue reading
+	reqStartTime := time.Now() //TODO
 	// Read ack
 	bufIn := make([]byte, 1024)
-	n, err := conn.Read(bufIn)
-	checkError(err)
-	reqEndTime := time.Now()
 
-	monitor.updateRTT(reqStartTime, reqEndTime)
-
-	if n > 0 {
-		var ackMsg AckMessage
-		err = json.Unmarshal(bufIn[:n], &ackMsg)
+	for {
+		n, err := monitor.Conn.Read(bufIn)
 		checkError(err)
 
-		// Check ack is for the correct heartbeat
-		if ackMsg.HBEatEpochNonce == hbeatMsg.EpochNonce && ackMsg.HBEatSeqNum == hbeatMsg.SeqNum {
-			logger.Println("makeRequest - Success! Received matching ack")
-			sleepTime := reqStartTime.Add(delay).Sub(reqEndTime)
-			<- time.After(sleepTime)//TODO is this correct
-			success <- struct{}{}
-		} else {
-			logger.Println(fmt.Sprintf("Expected nonce [%d] and seq [%d] but got nonce [%d] and seq [%d]",
-				hbeatMsg.EpochNonce, hbeatMsg.SeqNum, ackMsg.HBEatEpochNonce, ackMsg.HBEatSeqNum))
+		if n > 0 {
+			var ackMsg AckMessage
+			err = json.Unmarshal(bufIn[:n], &ackMsg)
+			checkError(err)
+
+			// Check ack is for the correct heartbeat
+			if ackMsg.HBEatEpochNonce == monitor.epochNonce && ackMsg.HBEatSeqNum == seq {
+				reqEndTime := time.Now()
+				monitor.updateRTT(reqStartTime, reqEndTime)
+				logger.Println("heartbeatRequest - Success! Received matching ack")
+				sleepTime := reqStartTime.Add(delay).Sub(reqEndTime)
+				<- time.After(sleepTime)//TODO is this correct
+				ackChannel <- struct{}{}
+				return //TODO maybe should not return and just always be listening (use channels to update)
+			} else {
+				logger.Println(fmt.Sprintf("Expected nonce [%d] and seq [%d] but got nonce [%d] and seq [%d]",
+					monitor.epochNonce, seq, ackMsg.HBEatEpochNonce, ackMsg.HBEatSeqNum))
+			}
+		}
+
+		if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
+			// Connection timeout
+			timeoutChan <- struct{}{}
+			return
 		}
 	}
-	return
+
 }
 
 func (monitor *Monitor) updateRTT(reqStartTime time.Time, reqEndTime time.Time) {

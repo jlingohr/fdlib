@@ -11,7 +11,10 @@ cannot change its API.
 
 package fdlib
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 //////////////////////////////////////////////////////
 // Define the message types fdlib has to use to communicate to other
@@ -72,5 +75,19 @@ type FD interface {
 func Initialize(EpochNonce uint64, ChCapacity uint8) (fd FD, notifyCh <-chan FailureDetected, err error) {
 	// TODO
 	//return nil, nil, errors.New("unimplemented")
-	return CreateDetector(EpochNonce, ChCapacity)
+	if FDLib == nil {
+		return CreateDetector(EpochNonce, ChCapacity)
+	} else {
+		FDLib.Stop()
+		FDLib = nil
+		err = InitializeError("Multiple calls to Initialize not allowed.")
+		return nil, nil, err
+	}
+
+}
+
+type InitializeError string
+
+func (e InitializeError) Error() string {
+	return fmt.Sprintf("[%s]", e.Error())
 }
