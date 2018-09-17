@@ -48,10 +48,10 @@ func (p *Peer) getDelay() time.Duration {
 }
 
 func (p *Peer) UpdateDelay(start time.Time, end time.Time) {
-	requestTime := end.Sub(start)
-	newDelay := (p.getDelay() + requestTime)/2
 	p.delayMux.Lock()
 	defer p.delayMux.Unlock()
+	requestTime := end.Sub(start)
+	newDelay := (p.Delay + requestTime)/2
 	p.Delay = newDelay
 	logger.Println(fmt.Sprintf("updateRTT - New delay is [%f]", p.Delay.Seconds()))
 	return

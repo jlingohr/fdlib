@@ -208,7 +208,8 @@ func StartHBeat(epochNonce uint64, peer *Peer, requestChan chan Request, ackChan
 			hbeatRequest := HBeatRequest{time.Now(), hbeatMsg}
 			outstandingRequests[seqNum] = hbeatRequest
 			requestChan <- request // Send the request
-			ticker := time.NewTicker(peer.getDelay())
+			delay := peer.getDelay()
+			ticker := time.NewTicker(delay)
 			defer ticker.Stop()
 
 		Inner:
@@ -234,6 +235,7 @@ func StartHBeat(epochNonce uint64, peer *Peer, requestChan chan Request, ackChan
 						delete(outstandingRequests, ackMsg.HBEatSeqNum) // Remove from outstanding requests
 						outstandingMsgs = 0
 						peer.UpdateDelay(outstandingRequest.RequestStartTime, ack.TimeReceived)
+						<- ticker.C
 						break Inner //TODO this might cause listener to block too much - maybe anouther routine so whenever break any outstanding still dealth with
 					}
 				case <- ticker.C:
