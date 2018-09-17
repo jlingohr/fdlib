@@ -55,16 +55,16 @@ type FD interface {
 	// messages. Always succeeds.
 	StopResponding()
 
-	// Tells the library to start monitoring a particular UDP IP:port
+	// Tells the library to start monitors a particular UDP IP:port
 	// with a specific lost messages threshold. Can return an error
 	// that is related to the underlying UDP connection.
 	AddMonitor(LocalIpPort string, RemoteIpPort string, LostMsgThresh uint8) (err error)
 
-	// Tells the library to stop monitoring a particular remote UDP
+	// Tells the library to stop monitors a particular remote UDP
 	// IP:port. Always succeeds.
 	RemoveMonitor(RemoteIpPort string)
 
-	// Tells the library to stop monitoring all nodes.
+	// Tells the library to stop monitors all nodes.
 	StopMonitoring()
 }
 

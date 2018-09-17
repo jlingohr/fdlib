@@ -6,6 +6,8 @@ import (
 	"log"
 	"net"
 	"os"
+	"sync"
+	"time"
 )
 
 var (
@@ -21,14 +23,61 @@ func checkError(err error) bool {
 	return false
 }
 
+type Peer struct {
+	Address *net.UDPAddr
+	Threshold uint8
+	Delay time.Duration
+	delayMux sync.Mutex
+	thresholdMux sync.Mutex
+}
+
+func NewPeer(remoteAddress string, lostMsgThreshold uint8) (peer *Peer, err error) {
+	rAddr, err := net.ResolveUDPAddr("udp", remoteAddress)
+	if checkError(err) {
+		return
+	}
+
+	peer = &Peer{Address: rAddr, Threshold: lostMsgThreshold, Delay: 3*time.Second}
+	return
+}
+
+func (p *Peer) getDelay() time.Duration {
+	p.delayMux.Lock()
+	defer p.delayMux.Unlock()
+	return p.Delay
+}
+
+func (p *Peer) UpdateDelay(start time.Time, end time.Time) {
+	requestTime := end.Sub(start)
+	newDelay := (p.getDelay() + requestTime)/2
+	p.delayMux.Lock()
+	defer p.delayMux.Unlock()
+	p.Delay = newDelay
+	logger.Println(fmt.Sprintf("updateRTT - New delay is [%f]", p.Delay.Seconds()))
+	return
+}
+
+func (p *Peer) GetThreshold() uint8 {
+	p.thresholdMux.Lock()
+	defer p.thresholdMux.Unlock()
+	return p.Threshold
+}
+
+func (p *Peer) UpdateThreshold(newThreshold uint8) {
+	p.thresholdMux.Lock()
+	defer p.thresholdMux.Unlock()
+	if newThreshold != p.Threshold {
+		p.Threshold = newThreshold
+	}
+	return
+}
 
 type Detector struct {
-	epochNonce   uint64
-	notifyChan   chan FailureDetected
-	monitoring   map[string]*Monitor // Map from remote IP:PORT to Monitor
-	respondingChan chan struct{} // Channel the local listens to
-	remoteToIDMap map[string]string // Map from remote address to Local::Remote id
-	//seqNum
+	epochNonce     uint64
+	notifyChan     chan FailureDetected
+	monitors       map[string]*Monitor // Map from remote IP:PORT to Monitor
+	respondingChan chan struct{}       // Channel the local listens to
+	remoteToMonitorMap map[string][]*Monitor // Map from remote address to address of monitor
 }
 
 /////////////
@@ -38,10 +87,10 @@ func CreateDetector(EpochNonce uint64, ChCapacity uint8) (fd FD, notifyCh <-chan
 	notifyChan := make(chan FailureDetected, ChCapacity)
 	respondingChan := make(chan struct{})
 	monitoring := make(map[string]*Monitor)
-	idMap := make(map[string]string)
-	//seqNum := newSeqNum()
+	remoteToMonitorMap := make(map[string][]*Monitor)
+	//sequenceNumber := newSeqNum()
 
-	fd = Detector{EpochNonce, notifyChan, monitoring, respondingChan, idMap}
+	fd = Detector{EpochNonce, notifyChan, monitoring, respondingChan, remoteToMonitorMap}
 	return
 }
 
@@ -98,7 +147,7 @@ func (fd Detector) StopResponding() {
 }
 
 
-// Tells the library to start monitoring a particular UDP IP:port
+// Tells the library to start monitors a particular UDP IP:port
 // with a specific lost messages threshold. Can return an error
 // that is related to the underlying UDP connection.
 func (fd Detector) AddMonitor(LocalIpPort string, RemoteIpPort string, LostMsgThresh uint8) (err error) {
@@ -108,51 +157,50 @@ func (fd Detector) AddMonitor(LocalIpPort string, RemoteIpPort string, LostMsgTh
 		RemoteIpPort,
 		LostMsgThresh))
 
-	id := LocalIpPort + "::" + RemoteIpPort
-
-	monitor, contains := fd.monitoring[id]
+	//id := LocalIpPort + "::" + RemoteIpPort
+	peer, err := NewPeer(RemoteIpPort, LostMsgThresh)
+	if checkError(err) {
+		return
+	}
+	monitor, contains := fd.monitors[LocalIpPort]
 	if !contains {
-		// Create new startMonitor
+		// Create new Monitor
+
 		logger.Println("AddMonitor - Adding supervisee to startMonitor")
-		monitor, err = NewMonitor(LocalIpPort, RemoteIpPort, LostMsgThresh, fd.epochNonce)
-		if err == nil {
-			fd.remoteToIDMap[RemoteIpPort] = id
-			fd.monitoring[id] = monitor
-			fd.startMonitor(monitor)
+		monitor, err = NewMonitor(LocalIpPort, fd.epochNonce)
+
+		if checkError(err) {
+			return
 		}
-		return
+		fd.monitors[LocalIpPort] = monitor
+		fd.remoteToMonitorMap[RemoteIpPort] = append(fd.remoteToMonitorMap[RemoteIpPort], monitor)
+		go RunMonitor(monitor, fd.notifyChan)
 	}
-	if monitor.Threshold != LostMsgThresh {
-		logger.Println("AddMonitor - Updating lost message threshold")
-		monitor.killSwitch <- struct{}{}
-		monitor.Threshold = LostMsgThresh
-		fd.startMonitor(monitor)
-		return
-	}
+	monitor.NewPeersChan <- peer
 	return
 }
 
-// Tells the library to stop monitoring a particular remote UDP
+// Tells the library to stop monitors a particular remote UDP
 // IP:port. Always succeeds.
 func (fd Detector) RemoveMonitor(RemoteIpPort string) {
-	id, contains := fd.remoteToIDMap[RemoteIpPort]
+	monitors, contains := fd.remoteToMonitorMap[RemoteIpPort]
 	if !contains {
 		return
 	}
-	monitored, contains := fd.monitoring[id]
-	if contains {
-		logger.Println(fmt.Sprintf("RemoveMonitor - Removing [%s]", RemoteIpPort))
-		monitored.killSwitch <- struct{}{}
+	for _, monitor := range monitors {
+		monitor.RemovePeersChan <- RemoteIpPort
 	}
 	return
 }
 
-// Tells the library to stop monitoring all nodes.
+// Tells the library to stop monitors all nodes.
 func (fd Detector) StopMonitoring() {
 	logger.Println("StopMonitoring - Stopping all heartbeats...")
-	for _, monitor := range(fd.monitoring) {
-		fd.RemoveMonitor(monitor.Conn.RemoteAddr().String())
+	for remoteIP, _ := range(fd.remoteToMonitorMap) {
+		//fd.RemoveMonitor(monitor.Conn.RemoteAddr().String())
+		fd.RemoveMonitor(remoteIP)
 	}
+	return
 }
 
 func (fd Detector) Stop() {
@@ -161,18 +209,15 @@ func (fd Detector) Stop() {
 //////////////////
 // Private methods
 
-func (fd Detector) startMonitor(monitor *Monitor) {
-
-	go func() {
-		failureChan := make(chan FailureDetected)
-		go StartMonitor(monitor, fd.notifyChan, failureChan)
-		detected := <- failureChan
-		fd.RemoveMonitor(detected.UDPIpPort)
-		return
-	}()
-}
 
 
+//func  startMonitor(monitor *Monitor, notifyChan chan FailureDetected) {
+//
+//	go sendHeartbeats(monitor.Conn)
+//	go listenAcks(monitor)
+//
+//
+//}
 
 
 
