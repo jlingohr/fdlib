@@ -112,7 +112,6 @@ func RunMonitor(monitor *Monitor, notifyChan chan FailureDetected) {
 				monitor.Peers[peerAddress] = newPeer
 				peer = newPeer
 			} else {
-				removeListenerChan <- peer.Address.String() //Stop heartbeats TODO will this cause problems?
 				peer.UpdateThreshold(newPeer.Threshold)
 			}
 			newListener := NewListener{peerAddress, make(chan HBeatAck)}
@@ -198,6 +197,7 @@ func StartHBeat(epochNonce uint64, peer *Peer, requestChan chan Request, ackChan
 				done <- struct{}{}
 			}
 		default:
+			delay := peer.getDelay()
 			seqNum := sequenceNumber.getSeqNum()
 			hbeatMsg := HBeatMessage{epochNonce, seqNum}
 			bufOut, err := json.Marshal(hbeatMsg)
@@ -208,7 +208,6 @@ func StartHBeat(epochNonce uint64, peer *Peer, requestChan chan Request, ackChan
 			hbeatRequest := HBeatRequest{time.Now(), hbeatMsg}
 			outstandingRequests[seqNum] = hbeatRequest
 			requestChan <- request // Send the request
-			delay := peer.getDelay()
 			ticker := time.NewTicker(delay)
 			defer ticker.Stop()
 
@@ -229,19 +228,18 @@ func StartHBeat(epochNonce uint64, peer *Peer, requestChan chan Request, ackChan
 					if !ok {
 						continue
 					}
-					if outstandingRequest.EpochNonce == ackMsg.HBEatEpochNonce {
+					if outstandingRequest.EpochNonce == ackMsg.HBEatEpochNonce && outstandingRequest.SeqNum == ackMsg.HBEatSeqNum {
 						logger.Println(fmt.Sprintf("StartHBeat - Successfully received ack [%d] from [%s]]", outstandingRequest.SeqNum, peer.Address))
 						//ticker.Stop() //TODO do you need this
+						peer.UpdateDelay(outstandingRequest.RequestStartTime, ack.TimeReceived)
 						delete(outstandingRequests, ackMsg.HBEatSeqNum) // Remove from outstanding requests
 						outstandingMsgs = 0
-						peer.UpdateDelay(outstandingRequest.RequestStartTime, ack.TimeReceived)
 						<- ticker.C
 						break Inner //TODO this might cause listener to block too much - maybe anouther routine so whenever break any outstanding still dealth with
 					}
 				case <- ticker.C:
 					logger.Println(fmt.Sprintf("StartHbeat - Timeout monitoring [%s]", peer.Address.String()))
 					outstandingMsgs += 1
-					//ticker.Stop()
 					break Inner //TODO maybe send request here
 				}
 			}
