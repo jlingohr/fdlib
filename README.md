@@ -1,1 +1,3 @@
-# A1-x4w7
+# fdlib
+
+UDP-based failure detector library
