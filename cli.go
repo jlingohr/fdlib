@@ -4,12 +4,27 @@ import (
 	"./fdlib"
 	"bufio"
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var context *FDContext
+var logger Logger //= log.New(os.Stdout, "CLI-", log.Lshortfile)
+
+type Logger struct {
+	file     *os.File
+}
+
+func newLogger(file *os.File) Logger {
+	return Logger{file}
+}
+
+func (logger Logger) log(message string) {
+	fmt.Fprintf(logger.file, "[%s][%s] %s\n", time.Now().Format("2006-01-02 15:04:05"), message)
+}
 
 type InvalidCommandError string
 
@@ -101,6 +116,16 @@ func (cmd StopMonitoringCmd) Run(context *FDContext)  (err error) {
 
 
 func main() {
+	f, err := os.OpenFile("log.txt", os.O_RDWR | os.O_CREATE, 0666)
+	//defer f.Close()
+	defer f.Close()
+	defer f.Sync()
+
+	if err != nil {
+		log.Fatalf(err.Error())
+	}
+	log.SetOutput(f)
+	logger = newLogger(f)
 	fmt.Println("Starting interactive shell for fdlib")
 
 	context = newContext()
@@ -211,7 +236,7 @@ func newContext() (ctxt *FDContext) {
 
 func checkErr(err error) error {
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Error ", err.Error())
+		logger.log(fmt.Sprintf("Error - [%s]", err.Error()))
 		return err
 	}
 	return nil
